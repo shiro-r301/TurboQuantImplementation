@@ -26,7 +26,6 @@ def generate_rotation_matrix(
 
     return Q.to(device=device, dtype=dtype)
 
-
 def generateQJLMatrix(
         d: int,
         device: torch.device,
@@ -35,7 +34,7 @@ def generateQJLMatrix(
 ) -> torch.Tensor:
     
     gen = torch.Generator(device='cpu')
-    gen.manual_seed(seed=seed)
+    gen.manual_seed(seed)
     S = torch.randn(d,d, generator=gen, dtype=torch.float32)
     return S.to(device=device, dtype=dtype)
 
@@ -74,19 +73,18 @@ def FWHT(
         data_reshaped[..., 1, :] = x-y
         h *= 2
     if normalize:
-        print("Gonna normalize")
         data /= sqrt(n)
         # print("Normalized Tensor: ", data)
     # print(data.shape)
     return data
 
-# def rotate_forward(x: torch.Tensor, Pi: torch.Tensor) -> torch.Tensor:
+# def forward_rotation(x: torch.Tensor, Pi: torch.Tensor) -> torch.Tensor:
 #     """Apply random rotation: y = x @ Pi^T (equivalent to Pi @ x for each vector)."""
 #     return torch.matmul(x, Pi.T)
 
-
-# def rotate_backward(y: torch.Tensor, Pi: torch.Tensor) -> torch.Tensor:
+# def backward_rotation(y: torch.Tensor, Pi: torch.Tensor) -> torch.Tensor:
 #     """Apply inverse rotation: x = y @ Pi (equivalent to Pi^T @ y)."""
+
 #     return torch.matmul(y, Pi)
 
 def forward_rotation(

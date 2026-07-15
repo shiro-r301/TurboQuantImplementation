@@ -3,13 +3,18 @@ from transformers.cache_utils import (
     DynamicSlidingWindowLayer,
     LinearAttentionLayer,
     LinearAttentionAndFullAttentionLayer,
-    DynamicLayer,
+    CacheLayerMixin,
     DynamicCache,
     Cache
 )
 from collections.abc import Iterable
 from transformers.configuration_utils import PreTrainedConfig
-from .TurboQuantOperations import TurboQuantOps
+from .TurboQuantOperations import (
+    TurboQuantMSE,
+    TurboQuantResidual,
+    TurboQJLPack,
+    TurboQMSEPack
+)
 
 class TurboQuantCache(Cache):
     """
@@ -56,13 +61,19 @@ class TurboQuantCache(Cache):
 
     def __init__(
         self,
+        device: torch.Device,
+        num_key_heads: int,
         ddp_cache_data: Iterable[tuple[torch.Tensor | None, ...]] | None = None,
         config: PreTrainedConfig | None = None,
         offloading: bool = False,
         offload_only_non_sliding: bool = False,
+        quant_size: int = 4,
+        dim: int = None,
+        seed: int = 310805,
     ):
-
+        self.device = device
         layers = []
+        self.tq_qjl = TurboQuantResidual(device=device, bits=quant_size, dim=dim, seed=seed)
         # If a config is passed, use it to infer the layer types and initialize accordingly
         if config is not None:
             decoder_config = config.get_text_config(decoder=True)
@@ -79,7 +90,7 @@ class TurboQuantCache(Cache):
                         layer_types.append("full_attention")
             # Some models have shared layers thus no cache is needed for them (e.g. Gemma3n)
             print("Appending Dynamic Layer for config")
-            layers = [TurboQuantLayer() * len(layer_types)]
+            layers = [TurboQuantLayer(tq_qjl=self.tq_qjl) * len(layer_types)]
 
         if len(layers) == 0:
             super().__init__(
@@ -94,12 +105,31 @@ class TurboQuantCache(Cache):
         for layer in self.layers:
             yield layer.keys, layer.values, getattr(layer, "_sliding_window_tensor", None)
 
-class TurboQuantLayer(DynamicLayer):
+
+
+
+class TurboQuantLayer(CacheLayerMixin):
+    def __init__(
+        self,
+        tq_qjl: TurboQuantResidual
+    ):
+        self.tq_qjl = tq_qjl
+    
+    def lazy_initialization(self, key_states, value_states) -> None:
+            self.dtype, self.device = key_states.dtype, key_states.device
+            self.key_cache = TurboQJLPack(
+                mse_indices=torch.tensor([], dtype=self.dtype, device=self.device),
+                mse_norms=torch.tensor([], dtype=self.dtype, device=self.device),
+                residual_pack=torch.tensor([], dtype=self.dtype, device=self.device),
+                residual_norms=torch.tensor([], dtype=self.dtype, device=self.device),
+            )
+            self.values=torch.tensor([], dtype=self.dtype, device=self.device)
+            self.is_iniitialized = True
+
     def update(
         self, 
         key_states: torch.tensor, 
         value_states: torch.tensor,
-        
         *args, 
         **kwargs
     ) -> tuple[torch.tensor, torch.tensor]:
@@ -112,14 +142,31 @@ class TurboQuantLayer(DynamicLayer):
         Returns:
             tuple[`torch.Tensor`, `torch.Tensor`]: The key and value states.
         """
+        
+
         # Lazy initialization
         if not self.is_initialized:
             self.lazy_initialization(key_states, value_states)
         # print(f"Shape of keys sent for caching: {key_states.shape}, values: {value_states.shape}")
 
         # key_states = TurboQuantOps.FWHT(key_states)
-        self.keys = torch.cat([self.keys, key_states], dim=-2)
+        self._store(key_states=key_states)
+        self.keys = self.tq_qjl.dequantize(self.key_cache)
         self.values = torch.cat([self.values, value_states], dim=-2)
 
         return self.keys, self.values           
+
+    def _store(self, key_states):
+        key_quant = self.tq_qjl.quantize(key_states)
+        self.key_cache = self._append(key_quant)
+
+    def _append(self, data: TurboQJLPack):
+        return TurboQJLPack(
+            mse_indices=torch.cat((self.key_cache.mse_indices,data.mse_indices), dim=-2),
+            mse_norms=torch.cat((self.key_cache.mse_norms,data.mse_norms), dim=-2),
+            residual_pack=torch.cat((self.key_cache.residual_pack,data.residual_pack), dim=-2),
+            residual_norms=torch.cat((self.key_cache.residual_norms,data.residual_norms), dim=-2)
+        )
+
+        
 
