@@ -1,12 +1,13 @@
 import math
 import torch.nn.functional as F
 import torch
+from abc import ABC, abstractmethod
 from math import sqrt, pi
 from typing import Sequence, NamedTuple
 import matplotlib.pyplot as plt
 from scipy.stats import kstest
-from codebook import get_codebook_tensors
-from rotations import (
+from .codebook import get_codebook_tensors
+from .rotations import (
     generate_rotation_matrix,
     forward_rotation,
     backward_rotation,
@@ -15,6 +16,15 @@ from rotations import (
 )
 
 
+class TurboMSEPack(NamedTuple):
+    """
+    This is an immutable form of cache storage for storing per layer information 
+    of packed mse_index, their norms. This is the default pack returned when using
+    TurboQuantMSE as the base class.
+    """
+    mse_indices: torch.Tensor
+    mse_norms: torch.Tensor
+    
 class TurboQJLPack(NamedTuple):
     """
     This is an immutable form of cache storage for storing per layer information 
@@ -26,6 +36,7 @@ class TurboQJLPack(NamedTuple):
     mse_norms: torch.Tensor
     residual_pack: torch.Tensor
     residual_norms: torch.Tensor
+
 
 
 def bit_packing(indices: torch.Tensor, bits: int) -> torch.Tensor:
@@ -46,7 +57,7 @@ def bit_packing(indices: torch.Tensor, bits: int) -> torch.Tensor:
     reshaped_idx = torch.reshape(indices, [*batches, -1, vals_per_byte])
     shifts = torch.arange(0, vals_per_byte, device=indices.device) * bits
     packed = (reshaped_idx << shifts).sum(dim=-1).reshape(*batches, (d+extra_idx) // vals_per_byte)
-    return packed
+    return packed.to(dtype=torch.uint8)
 
 def bit_unpacking(packed_idx: torch.Tensor, bits: int, d: int) -> torch.Tensor:
     batches = packed_idx.shape[:-1]
@@ -62,10 +73,49 @@ def bit_unpacking(packed_idx: torch.Tensor, bits: int, d: int) -> torch.Tensor:
     unpacker = (1 << bits) - 1
     shifts = torch.arange(0, vals_per_byte, device=packed_idx.device) * bits
     unpacked_idx = ((packed_idx.unsqueeze(-1) >> shifts) & unpacker).reshape(*batches, -1).to(dtype=torch.long)
-    # print("Unpack: ", unpacked_idx[:d].long())
     return unpacked_idx[:d].long()
 
-class TurboQuantMSE(torch.nn.Module):
+
+class BaseQuantizeClass(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+    
+    @abstractmethod
+    def quantize(self, x):
+        """Responsible for Quantizing the values packed in x.
+        x can either be TurboMSEPack, TurboQJLPack or just base Tensors.
+        Each format must but meet its own class initialization.
+        Returns TurboMSEPack, TurboQJLPack or just base Tensors depending on initialization.
+        """
+        ...
+        
+    @abstractmethod
+    def dequantize(self, packed):
+        """Responsible for Dequantizing the values packed in packed.
+        packed can either be TurboMSEPack, TurboQJLPack or just base Tensors.
+        Each format must but meet its own class initialization.
+        Returns a single Tensor of the shape [1, heads, tokens, proj_dim] """
+        ...
+
+    @abstractmethod
+    def append(self, old_states, new_states) -> TurboMSEPack | TurboQJLPack | torch.Tensor:
+        ... 
+    
+    @abstractmethod
+    def initialize_states(self, states) -> TurboMSEPack | TurboQJLPack | torch.Tensor:
+        ... 
+
+class NoOpQuantizer(BaseQuantizeClass):
+    def quantize(self,x):
+        return x
+    def dequantize(self, packed):
+        return packed
+    def append(self, old_states: torch.Tensor, new_states: torch.Tensor):
+        return torch.cat((new_states, old_states), dim = -2)
+    def initialize_states(self, states):
+        return torch.tensor([], dtype=states.dtype, device=states.device)
+
+class TurboQuantMSE(BaseQuantizeClass):
     def __init__(
         self,
         device: torch.device,
@@ -79,8 +129,9 @@ class TurboQuantMSE(torch.nn.Module):
         self.dim = dim
         self.b = bits
         self.dtype = dtype
+        # print("R_DIM: ", dim)
         self.register_buffer('d1', generateRademacher(dim=self.dim, seed=seed+100, device='cuda', dtype=self.dtype))
-        # self.register_buffer('d1', generate_rotation_matrix(d=self.dim, device=self.device, dtype=self.dtype, seed=seed))
+        # self.register_buffer('d1', generate_rotation_matrix(d=self.dim, device=self.device, dtype=self.dtype, seed=seed+100))
         centroids, boundaries = get_codebook_tensors(dim, bits, self.device, dtype)
         self.register_buffer("centroids", centroids)      
         self.register_buffer("boundaries", boundaries)
@@ -89,7 +140,7 @@ class TurboQuantMSE(torch.nn.Module):
     def quantize(
         self,
         x: torch.Tensor,
-    ):
+    ) -> TurboMSEPack:
         #unit hypersphere
         x_norm = x.norm(dim=-1)
         x = x / (x_norm.unsqueeze(-1) + 1e-10)
@@ -100,16 +151,35 @@ class TurboQuantMSE(torch.nn.Module):
         x_indices = torch.searchsorted(self.decision_boundaries, x_rot.contiguous())
         # print(f"X Packed: {x_indices}")
         x_packed =  bit_packing(x_indices, self.b)
-        return x_packed, x_norm
+        # print("Dtype Nigga: ", x_packed.dtype)
+        return TurboMSEPack(
+            mse_indices=x_packed, 
+            mse_norms=x_norm
+        )
 
     
-    def dequantize(self, pack_idx: torch.Tensor, x_norm: torch.Tensor):
+    def dequantize(self, packed: TurboMSEPack):
+        # print("Dequanting at MSE")
+        pack_idx = packed.mse_indices
+        x_norm = packed.mse_norms
         x_unpack = bit_unpacking(packed_idx=pack_idx, bits=self.b, d=self.dim)
         x_quant = self.centroids[x_unpack[...,:]]
         x_bar = backward_rotation(x_quant,self.d1)
         return x_bar * x_norm.unsqueeze(-1)
+    
+    def append(self, old_states: TurboMSEPack, new_states: TurboMSEPack):
+        return TurboMSEPack( 
+            mse_indices=torch.cat((new_states.mse_indices, old_states.mse_indices), dim = -2),
+            mse_norms=torch.cat((new_states.mse_norms, old_states.mse_norms), dim = -1),
+        )
+    
+    def initialize_states(self, states):
+        return TurboMSEPack(
+            mse_indices=torch.tensor([], device=states.device, dtype=torch.uint8),
+            mse_norms=torch.tensor([], device=states.device, dtype=states.dtype)
+        )
 
-class TurboQuantResidual(torch.nn.Module):
+class TurboQuantResidual(BaseQuantizeClass):
     def __init__(
         self,
         device: torch.device,
@@ -122,7 +192,7 @@ class TurboQuantResidual(torch.nn.Module):
         self.dim = dim
         self.dtype = dtype
         self.device = device if torch.cuda.is_available() else 'cpu'
-        self.register_buffer('S', generateQJLMatrix(d=self.dim, device=self.device, dtype=self.dtype, seed=seed))
+        self.register_buffer('S', generateQJLMatrix(d=self.dim,s=self.dim, device=self.device, dtype=self.dtype, seed=seed))
         self.tq_mse = TurboQuantMSE(device=device, dim=dim, bits=bits-1, seed=seed+3108, dtype=self.dtype)
         self.cf = sqrt(math.pi/2.0)/dim
 
@@ -130,11 +200,9 @@ class TurboQuantResidual(torch.nn.Module):
         self,
         x: torch.Tensor, #residual
     ) -> TurboQJLPack:
-        if dim is None:
-            dim = x.shape[-1]
-        x_pack, x_norms = self.tq_mse.quantize(x)
-        x_mse = self.tq_mse.dequantize(x_pack, x_norms)
-
+        x_quant = self.tq_mse.quantize(x)
+        x_pack, x_norms = x_quant.mse_indices, x_quant.mse_norms
+        x_mse = self.tq_mse.dequantize(TurboMSEPack(x_pack, x_norms))
         e = x - x_mse 
         e_norm = e.norm(dim=-1)
 
@@ -144,27 +212,42 @@ class TurboQuantResidual(torch.nn.Module):
         e_qjl = bit_packing(e_proj, bits=1)
 
         return TurboQJLPack(
-            mse_indices=x_pack,
+            mse_indices=x_pack.to(dtype=torch.uint8, device=self.device),
             mse_norms=x_norms,
-            residual_pack=e_qjl,
+            residual_pack=e_qjl.to(dtype=torch.uint8, device=self.device),
             residual_norms=e_norm            
         )
 
 
-    def dequantize(self, packedCache: TurboQJLPack) -> torch.Tensor:
-        x_mse = self.tq_mse.dequantize(packedCache.mse_indices, packedCache.mse_norms) #get mse from packed x
-        unpack_Eqjl = bit_unpacking(packedCache.residual_pack, bits=1, d=self.dim) #get unpacked signed residuals
+    def dequantize(self, packed: TurboQJLPack) -> torch.Tensor:
+        x_mse = self.tq_mse.dequantize(TurboMSEPack(packed.mse_indices, packed.mse_norms)) #get mse from packed x
+        unpack_Eqjl = bit_unpacking(packed.residual_pack, bits=1, d=self.dim) #get unpacked signed residuals
         unpack_Eqjl = 2*unpack_Eqjl - 1
         #Q.(S.T @ Sign(e,S)) * sqrt(pi/2)/d * |e|
         x_qjl = torch.matmul(unpack_Eqjl.to(dtype=self.dtype), self.S.T) 
-        x_qjl = x_qjl * (self.cf * packedCache.residual_norms.unsqueeze(-1))
-        return x_qjl + x_mse
+        x_qjl = x_qjl * (self.cf * packed.residual_norms.unsqueeze(-1))
+        return x_mse + x_qjl
+    
+    def append(self, old_states: TurboQJLPack, new_states: TurboQJLPack):
+        return TurboQJLPack(
+            mse_indices=torch.cat((old_states.mse_indices,new_states.mse_indices), dim=-2),
+            mse_norms=torch.cat((old_states.mse_norms,new_states.mse_norms), dim=-1),
+            residual_pack=torch.cat((old_states.residual_pack,new_states.residual_pack), dim=-2),
+            residual_norms=torch.cat((old_states.residual_norms,new_states.residual_norms), dim=-1)
+        )
+    
+    def initialize_states(self, states):
+        return TurboQJLPack(
+            mse_indices=torch.tensor([], device=states.device, dtype=torch.uint8),
+            mse_norms=torch.tensor([], device=states.device, dtype=states.dtype),
+            residual_pack=torch.tensor([], device=states.device, dtype=torch.uint8),
+            residual_norms=torch.tensor([], device=states.device, dtype=states.dtype),
+        )
 
-    def forward(self, x): #can be used to produce 
-        return self.dequantize(self.quantize(x))
+    
 if __name__ == '__main__':
     n = 128
-    a = torch.Tensor([ 2.2500e+00,  2.0781e+00, -3.6250e+00, -1.7344e+00,  9.0234e-01,
+    a = torch.tensor([ 2.2500e+00,  2.0781e+00, -3.6250e+00, -1.7344e+00,  9.0234e-01,
         -8.5156e-01, -2.4062e+00,  9.5312e-01,  8.9844e-01,  6.0156e-01,
         -4.0312e+00, -5.3711e-02,  2.9688e+00,  7.8125e-03,  3.7812e+00,
         -2.5781e+00,  3.1562e+00,  2.5195e-01,  4.7070e-01,  8.0078e-01,
@@ -188,8 +271,12 @@ if __name__ == '__main__':
          1.8750e+00,  1.7031e+00, -2.5938e+00, -4.5117e-01,  9.7266e-01,
          2.2969e+00,  3.9375e+00,  1.6406e+00, -3.0625e+01,  1.6484e+00,
         -1.4375e+01,  5.4688e-01,  1.1172e+00,  8.5625e+00,  4.9609e-01,
-         1.0562e+01, -1.7875e+01, -2.5250e+01, -5.3500e+01,  2.3875e+01,
-         5.5750e+01,  2.4750e+01,  8.6000e+01])
+         1.0562e+01, -1.7875e+01, -2.5250e+01, -4.3500e+01,  2.3875e+01,
+         5.5750e+01,  2.4750e+01,  8.6000e+01], device='cuda')
+    b = TurboQuantResidual(device='cuda',bits=8,dim=128, seed=222, dtype=torch.float32)
+    c = b.quantize(a)
+    print(b.dequantize(c).norm(dim=-1))
+    print(a.norm(dim=-1))
     # ops = TurboQuantMSE(dim=128, bits=4)
     # idx = ops.quantize(a.reshape(1,-1))
     # # print(idx)

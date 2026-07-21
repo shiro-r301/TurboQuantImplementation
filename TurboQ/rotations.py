@@ -28,6 +28,7 @@ def generate_rotation_matrix(
 
 def generateQJLMatrix(
         d: int,
+        s: int,
         device: torch.device,
         dtype: torch.dtype = torch.float32,
         seed: int = 310805 
@@ -35,7 +36,7 @@ def generateQJLMatrix(
     
     gen = torch.Generator(device='cpu')
     gen.manual_seed(seed)
-    S = torch.randn(d,d, generator=gen, dtype=torch.float32)
+    S = torch.randn(d,s, generator=gen, dtype=torch.float32)
     return S.to(device=device, dtype=dtype)
 
 
@@ -47,13 +48,10 @@ def generateRademacher(
 ) -> torch.Tensor:
     rng = torch.Generator()
     rng.manual_seed(seed)
-
     rademacherVector = torch.empty(dim)
     rademacherVector.random_(0,2, generator=rng)
     rademacherVector[rademacherVector == 0] = -1
     return rademacherVector.to(device=device, dtype=dtype)
-
-
 
 #1. Rotation
 def FWHT(
@@ -102,26 +100,3 @@ def backward_rotation(
     x_rot1 = FWHT(x, normalize=True)
     x_ran = torch.mul(D1,x_rot1)
     return x_ran
-
-# def forward_rotation(
-#     x: torch.Tensor,
-#     D1: torch.Tensor,
-#     D2: torch.Tensor
-# ) ->  torch.Tensor:
-#     x_ran = torch.mul(D1,x)
-#     x_rot1 = FWHT(x_ran, normalize=True)
-#     x_ran2 = torch.mul(D2,x_rot1)
-#     x_rot2 = FWHT(x_ran2, normalize=True)
-#     return x_rot2
-#     # return x_rot1
-
-# def backward_rotation(
-#     x: torch.Tensor,       
-#     D1: torch.Tensor,
-#     D2: torch.Tensor,
-# ) ->  torch.Tensor:
-#     x_rot2 = FWHT(x, normalize=True)
-#     x_ran2 = torch.mul(D2,x_rot2)
-#     x_rot1 = FWHT(x, normalize=True)
-#     x_ran = torch.mul(D1,x_rot1)
-#     return x_ran
