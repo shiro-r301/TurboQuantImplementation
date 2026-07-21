@@ -3,7 +3,7 @@
 A from-scratch PyTorch implementation of **TurboQuant** (Zandieh, Daliri, Hadian, Mirrokni — ICLR 2026), which combines **PolarQuant**-style rotation + Lloyd-Max scalar quantization with an optional **1-bit QJL residual correction**, wired directly into HuggingFace `transformers`' `Cache` API as a drop-in replacement for `DynamicCache`.
 
 ## Acknowledgments
-This implementation draws heavily on [0xSero/turboquant](https://github.com/0xsero/turboquant), including some code used directly with minimal or no modification. Credit to 0xSero for the original implementation work — this repo should be read as a derivative/study built on top of theirs, not an independent implementation.
+This implementation draws heavily on [0xSero/turboquant](https://github.com/0xsero/turboquant), including some code used directly with minimal or no modification. Credit to 0xSero for the original implementation work. This repo should be read as a derivative/study built on top of theirs, not an independent implementation.
 
 ## What it does
 
@@ -66,14 +66,13 @@ output = model.generate(
 
 ## Known limitation
 
-Empirical testing against Qwen2.5-3B-Instruct found that `TurboQuantResidual`'s QJL correction **increases** end-to-end reconstruction error relative to plain MSE-only quantization (`TurboQuantMSE`) at low bit-widths (b ≤ 3-4), rather than improving it. This matches independent findings reported elsewhere in the community for the same bit-width regime and small head dimensions, attributed to variance from the 1-bit correction outweighing its unbiasedness benefit once passed through softmax. **Recommendation: use `TurboQuantMSE` for both keys and values at low bit budgets; treat `TurboQuantResidual` as experimental.**
+Empirical testing against Qwen2.5-3B-Instruct found that `TurboQuantResidual`'s QJL correction **increases** reconstruction error relative to plain MSE-only quantization (`TurboQuantMSE`) at low bit-widths (b ≤ 3-4), rather than improving it. This matches independent findings reported elsewhere in the community for the same bit-width regime and small head dimensions, attributed to variance from the 1-bit correction outweighing its unbiasedness benefit once passed through softmax. **Recommendation: use `TurboQuantMSE` for both keys and values at low bit budgets; treat `TurboQuantResidual` as experimental.**
 
 ## Requirements
 
-`torch`, `transformers` (recent version exposing `CacheLayerMixin` / `DynamicSlidingWindowLayer` in `cache_utils`), `numpy`, `scipy`, `matplotlib` (optional, for diagnostic plots in `test.py`).
+`torch`, `transformers` (recent version exposing `CacheLayerMixin` in `cache_utils`), `numpy`, `scipy`, `matplotlib` (optional, for diagnostic plots in `test.py`).
 
 ## References
-
 - Zandieh, Daliri, Hadian, Mirrokni. *TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate.* ICLR 2026. arXiv:2504.19874
 - Han, Kacham, Karbasi, Mirrokni, Zandieh. *PolarQuant: Quantizing KV Caches with Polar Transformation.* AISTATS 2026. arXiv:2502.02617
 - Zandieh, Daliri, Han. *QJL: 1-Bit Quantized JL Transform for KV Cache Quantization with Zero Overhead.* AAAI 2025. arXiv:2406.03482
