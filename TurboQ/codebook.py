@@ -1,3 +1,5 @@
+"""Will be making my own implementation of this soon."""
+
 """
 Lloyd-Max codebook computation for TurboQuant.
 
