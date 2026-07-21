@@ -24,7 +24,6 @@ The result plugs directly into `model.generate(..., past_key_values=TurboQuantCa
 | `TurboQuantOperations.py` | Core quantizer classes: `NoOpQuantizer`, `TurboQuantMSE` (rotation + Lloyd-Max codebook, MSE-optimal), `TurboQuantResidual` (MSE quantizer at `bits-1` + 1-bit QJL residual correction, "prod"-style); bit-packing/unpacking utilities; `TurboMSEPack`/`TurboQJLPack` storage tuples |
 | `TQCache.py` | `TurboQuantCache` (subclasses `transformers.cache_utils.Cache`) and `TurboQuantLayer` (subclasses `CacheLayerMixin`) — the HF-compatible cache object, with independent quantizer choices for keys and values |
 | `test.py` | End-to-end inference driver against `Qwen/Qwen2.5-3B-Instruct`, plus (commented out) an earlier standalone bias/reconstruction test harness used during development |
-| `__init__.py` | Empty — package marker |
 
 ## Usage
 
@@ -69,10 +68,4 @@ output = model.generate(
 Empirical testing against Qwen2.5-3B-Instruct found that `TurboQuantResidual`'s QJL correction **increases** reconstruction error relative to plain MSE-only quantization (`TurboQuantMSE`) at low bit-widths (b ≤ 3-4), rather than improving it. This matches independent findings reported elsewhere in the community for the same bit-width regime and small head dimensions, attributed to variance from the 1-bit correction outweighing its unbiasedness benefit once passed through softmax. **Recommendation: use `TurboQuantMSE` for both keys and values at low bit budgets; treat `TurboQuantResidual` as experimental.**
 
 ## Requirements
-
 `torch`, `transformers` (recent version exposing `CacheLayerMixin` in `cache_utils`), `numpy`, `scipy`, `matplotlib` (optional, for diagnostic plots in `test.py`).
-
-## References
-- Zandieh, Daliri, Hadian, Mirrokni. *TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate.* ICLR 2026. arXiv:2504.19874
-- Han, Kacham, Karbasi, Mirrokni, Zandieh. *PolarQuant: Quantizing KV Caches with Polar Transformation.* AISTATS 2026. arXiv:2502.02617
-- Zandieh, Daliri, Han. *QJL: 1-Bit Quantized JL Transform for KV Cache Quantization with Zero Overhead.* AAAI 2025. arXiv:2406.03482
